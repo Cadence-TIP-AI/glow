@@ -19,6 +19,22 @@
 using namespace glow;
 using namespace glow::runtime;
 
+template <class F> struct shared_function {
+  std::shared_ptr<F> f;
+  shared_function() = delete; // = default works, but I don't use it
+  shared_function(F &&f_) : f(std::make_shared<F>(std::move(f_))) {}
+  shared_function(shared_function const &) = default;
+  shared_function(shared_function &&) = default;
+  shared_function &operator=(shared_function const &) = default;
+  shared_function &operator=(shared_function &&) = default;
+  template <class... As> auto operator()(As &&... as) const {
+    return (*f)(std::forward<As>(as)...);
+  }
+};
+template <class F>
+shared_function<std::decay_t<F>> make_shared_function(F &&f) {
+  return {std::forward<F>(f)};
+}
 QueueBackedDeviceManager::QueueBackedDeviceManager(BackendKind backend,
                                                    llvm::StringRef name)
     : DeviceManager(backend, name), workThread_(1) {}
@@ -48,12 +64,13 @@ QueueBackedDeviceManager::runFunction(std::string functionName,
                                       ResultCBTy callback) {
 
   RunIdentifierTy id = nextIdentifier_++;
-  workThread_.submit([this, id, functionName = std::move(functionName),
-                      ctx = std::move(ctx),
-                      callback = std::move(callback)]() mutable {
+  auto func = [this, id, functionName = std::move(functionName),
+               ctx = std::move(ctx), callback = std::move(callback)]() mutable {
     runFunctionImpl(id, std::move(functionName), std::move(ctx),
                     std::move(callback));
-  });
+  };
+  std::function<void()> funcShared = make_shared_function(std::move(func));
+  workThread_.submit(funcShared);
   return id;
 }
 
