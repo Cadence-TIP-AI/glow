@@ -30,8 +30,10 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <sstream>
+#include <thread>
 
 using namespace glow;
 
@@ -63,6 +65,29 @@ llvm::cl::opt<unsigned> miniBatch(
         "multiple of the mini-batch size. By default, splitting the input "
         "image list into mini-batches is deactivated."),
     llvm::cl::Optional, llvm::cl::init(0), llvm::cl::cat(imageLoaderCat));
+
+llvm::cl::opt<unsigned> miniBatchThreads(
+    "minibatch-threads",
+    llvm::cl::desc(
+        "Max number of threads used to process mini-batches. If "
+        "minibatch-threads is greater than 1, and we are working in minibatch "
+        "mode, then several worker threads are created to process the "
+        "minibatches. Then the minibatches are distributed between these "
+        "threads, and each thread processes its set of minibatches "
+        "independently."
+        " By default, the number of threads is 1, and no parallelization is "
+        "happening. These are things to be aware of:\n"
+        "\t- The actual number of worker threads can be less than specified by "
+        "this option (for example, if specified number of threads is greater "
+        "than number of minibatches to process). Their number may also be "
+        "forced to 1 in some cases (see below);\n"
+        "\t- Currently, dumping profile and emitting bundle force "
+        "single-threaded mode;\n"
+        "\t- If a model has operations that make reduction across images in "
+        "the batch, it's user's responsibility to make sure that this model is "
+        "not processed in multi-threaded mode. Otherwise, the correctness of "
+        "results is not guaranteed."),
+    llvm::cl::Optional, llvm::cl::init(1), llvm::cl::cat(imageLoaderCat));
 
 llvm::cl::opt<unsigned> labelOffset(
     "label-offset",
@@ -123,21 +148,23 @@ static bool getNextImageFilenames(std::vector<std::string> *filenames) {
 
 /// Generate in \p imageList the list of filenames corresponding to the next
 /// mini-batch of size \p miniBatchSize extracted from \p totalImageList at
+
 /// index \p minibatchIndex. /returns true if the index is valid, false
 /// otherwise. In case the function returns true, \p minibatchIndex is
-/// incremented by \p miniBatchSize.
+/// incremented by \p miniBatchSize. Stop when upon reaching \p miniBatchLimit.
 static bool getNextMiniBatch(std::vector<std::string> &imageList,
-                             llvm::ArrayRef<std::string> totalImageList,
-                             size_t &minibatchIndex, size_t miniBatchSize) {
-  if (minibatchIndex >= totalImageList.size()) {
+                             std::vector<std::string> &totalImageList,
+                             size_t &miniBatchIndex, size_t miniBatchSize,
+                             size_t miniBatchLimit) {
+  if (miniBatchIndex >= miniBatchLimit) {
     return false;
   }
   imageList.clear();
-  size_t endIndex = minibatchIndex + miniBatchSize;
-  for (size_t index = minibatchIndex; index < endIndex; index++) {
+  size_t endIndex = miniBatchIndex + miniBatchSize;
+  for (size_t index = miniBatchIndex; index < endIndex; index++) {
     imageList.push_back(totalImageList[index]);
   }
-  minibatchIndex += miniBatchSize;
+  miniBatchIndex += miniBatchSize;
   return true;
 }
 
@@ -364,12 +391,16 @@ static void parseInputImageList(const std::string &inputImageListFile) {
   inFile.close();
 }
 
+struct ScopedLock {
+  std::mutex &mu;
+  ScopedLock(std::mutex &mu) : mu(mu) { mu.lock(); }
+  ~ScopedLock() { mu.unlock(); }
+};
+
 int main(int argc, char **argv) {
-  PlaceholderBindings bindings;
   // Verify/initialize command line parameters, and then loader initializes
   // the ExecutionEngine and Function.
   parseCommandLine(argc, argv);
-  Loader loader;
 
   if (inputImageListFile.empty() && inputImageFilenames.size() == 0) {
     llvm::errs()
@@ -413,80 +444,130 @@ int main(int argc, char **argv) {
       ((!miniBatchMode) || (inputImageFilenames.size() % miniBatch == 0)) &&
       "The number of input images must be a multiple of the mini-batch.");
 
-  // Used to make sure we only compile once, and run only once if not streaming.
-  bool isFirstRun = true;
-
-  // These will be set during the first run.
-  Placeholder *inputImagePH = nullptr;
-  Tensor *SMT = nullptr;
-
-  size_t minibatchIndex = 0;
-  Tensor inputImageData;
-  std::vector<std::string> inputImageBatchFilenames;
-  if ((!miniBatchMode) && (!streamInputFilenamesMode)) {
-    inputImageBatchFilenames = inputImageFilenames;
-  }
-
   // Print out the inferred image classification.
-  llvm::outs() << "Model: " << loader.getFunction()->getName() << "\n";
-
+  llvm::outs() << "Model: " << Loader::getModelOptPath() << "\n";
+  std::mutex io_mu;
   int numErrors = 0;
-  while ((streamInputFilenamesMode &&
-          getNextImageFilenames(&inputImageBatchFilenames)) ||
-         (miniBatchMode &&
-          getNextMiniBatch(inputImageBatchFilenames, inputImageFilenames,
-                           minibatchIndex, miniBatch)) ||
-         isFirstRun) {
-    // Load and process the image data into the inputImageData Tensor.
-    loadImagesAndPreprocess(inputImageBatchFilenames, &inputImageData,
-                            imageNormMode, imageChannelOrder, imageLayout);
+  // Process a set of minibatches with indices [startIndex, endIndex).
+  auto processImageRange = [&](size_t startIndex, size_t endIndex) {
+    PlaceholderBindings bindings;
+    Loader loader;
+    // Used to make sure we only compile once, and run only once if not
+    // streaming.
+    bool isFirstRun = true;
+    // These will be set during the first run.
+    Placeholder *inputImagePH = nullptr;
+    Tensor *SMT = nullptr;
+    size_t miniBatchIndex = startIndex;
+    Tensor inputImageData;
+    std::vector<std::string> inputImageBatchFilenames;
+    if ((!miniBatchMode) && (!streamInputFilenamesMode)) {
+      inputImageBatchFilenames = inputImageFilenames;
+    }
 
-    // If this is the first run, then we need to build and compile the model.
-    if (isFirstRun) {
-      isFirstRun = false;
+    while ((streamInputFilenamesMode &&
+            getNextImageFilenames(&inputImageBatchFilenames)) ||
+           (miniBatch &&
+            getNextMiniBatch(inputImageBatchFilenames, inputImageFilenames,
+                             miniBatchIndex, miniBatch, endIndex)) ||
+           isFirstRun) {
+      // Load and process the image data into the inputImageData Tensor.
+      loadImagesAndPreprocess(inputImageBatchFilenames, &inputImageData,
+                              imageNormMode, imageChannelOrder, imageLayout);
 
-      // Build and compile the graph, and then get back the input Placeholder
-      // and output Softmax Tensor.
-      std::pair<Placeholder *, Tensor *> inputOutputPair =
-          buildAndCompileAndGetInAndOutPair(loader, bindings,
-                                            &inputImageData.getType());
+      // If this is the first run, then we need to build and compile the model.
+      if (isFirstRun) {
+        isFirstRun = false;
 
-      // If in bundle mode, the bundle has been saved by the above call, so we
-      // can safely return.
-      if (emittingBundle()) {
-        return 0;
+        // Build and compile the graph, and then get back the input Placeholder
+        // and output Softmax Tensor.
+        std::pair<Placeholder *, Tensor *> inputOutputPair =
+            buildAndCompileAndGetInAndOutPair(loader, bindings,
+                                              &inputImageData.getType());
+
+        // If in bundle mode, the bundle has been saved by the above call, so we
+        // can safely return.
+        if (emittingBundle()) {
+          return;
+        }
+
+        inputImagePH = inputOutputPair.first;
+        SMT = inputOutputPair.second;
+      }
+      assert(inputImagePH && SMT && "Input and output must be valid.");
+      GLOW_ASSERT(inputImagePH->dims() == inputImageData.dims() &&
+                  "New input shape does not match the compiled function.");
+
+      // Convert the raw input to fp16. This must be done every time we get new
+      // image data.
+      if (convertInAndOutToFp16) {
+        inputImageData.convertToType(ElemKind::Float16Ty);
       }
 
-      inputImagePH = inputOutputPair.first;
-      SMT = inputOutputPair.second;
+      // About to run inference, so update the input image Placeholder's backing
+      // Tensor with inputImageData.
+      updateInputPlaceholders(bindings, {inputImagePH}, {&inputImageData});
+
+      // Perform the inference execution, updating SMT.
+      auto batchSize = inputImageData.dims()[0];
+      loader.runInference(bindings, batchSize);
+
+      // Print the top-k results from the output Softmax tensor.
+      {
+        ScopedLock lock(io_mu);
+        numErrors += processAndPrintResults(SMT, inputImageBatchFilenames);
+      }
     }
-    assert(inputImagePH && SMT && "Input and output must be valid.");
-    GLOW_ASSERT(inputImagePH->dims() == inputImageData.dims() &&
-                "New input shape does not match the compiled function.");
 
-    // Convert the raw input to fp16. This must be done every time we get new
-    // image data.
-    if (convertInAndOutToFp16) {
-      inputImageData.convertToType(ElemKind::Float16Ty);
+    // If profiling, generate and serialize the quantization infos now that we
+    // have run inference one or more times to gather the profile.
+    if (profilingGraph()) {
+      loader.generateAndSerializeQuantizationInfos(bindings);
     }
+  };
 
-    // About to run inference, so update the input image Placeholder's backing
-    // Tensor with inputImageData.
-    updateInputPlaceholders(bindings, {inputImagePH}, {&inputImageData});
-
-    // Perform the inference execution, updating SMT.
-    auto batchSize = inputImageData.dims()[0];
-    loader.runInference(bindings, batchSize);
-
-    // Print the top-k results from the output Softmax tensor.
-    numErrors += processAndPrintResults(SMT, inputImageBatchFilenames);
+  // We will force single-threaded execution if:
+  // - Minibatch mode is disabled;
+  // - We are going to emit bundle and do not do inference;
+  // - We are collecting inference profile.
+  // Otherwise, there can be several minibatches of equal size.
+  const bool multiThreadingAllowed =
+      miniBatchMode && !emittingBundle() && !profilingGraph();
+  const size_t numBatches =
+      miniBatchMode ? inputImageFilenames.size() / miniBatch : 1u;
+  const size_t numThreads = multiThreadingAllowed
+                                ? std::min(size_t(miniBatchThreads), numBatches)
+                                : 1u;
+  if (miniBatchThreads > 1 && !multiThreadingAllowed) {
+    llvm::outs() << "WARNING: multi-threaded execution is not possible. Make "
+                    "sure that minibatch size is specified and you are not "
+                    "trying to dump profile or emit bundle.\n";
   }
 
-  // If profiling, generate and serialize the quantization infos now that we
-  // have run inference one or more times to gather the profile.
-  if (profilingGraph()) {
-    loader.generateAndSerializeQuantizationInfos(bindings);
+  llvm::outs() << "Running " << numThreads << " thread(s).\n";
+  std::vector<std::thread> threads(numThreads);
+  const size_t miniBatchesPerThread =
+      (numBatches + numThreads - 1) / numThreads;
+  for (size_t i = 0; i < numThreads; i++) {
+    size_t startIndex, endIndex;
+    if (numThreads > 1) {
+      startIndex = i * miniBatchesPerThread * miniBatch;
+      endIndex = std::min((i + 1) * miniBatchesPerThread * miniBatch,
+                          inputImageFilenames.size());
+    } else {
+      startIndex = 0;
+      endIndex = inputImageFilenames.size();
+    }
+    auto worker = [&processImageRange, startIndex, endIndex]() {
+      processImageRange(startIndex, endIndex);
+    };
+    threads.push_back(std::thread(worker));
   }
 
+  for (auto &t : threads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
   return numErrors;
 }
