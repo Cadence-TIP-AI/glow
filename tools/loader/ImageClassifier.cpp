@@ -366,9 +366,10 @@ static void parseInputImageList(const std::string &inputImageListFile) {
 
 int main(int argc, char **argv) {
   PlaceholderBindings bindings;
-  // The loader verifies/initializes command line parameters, and initializes
+  // Verify/initialize command line parameters, and then loader initializes
   // the ExecutionEngine and Function.
-  Loader loader(argc, argv);
+  parseCommandLine(argc, argv);
+  Loader loader;
 
   if (inputImageListFile.empty() && inputImageFilenames.size() == 0) {
     llvm::errs()
