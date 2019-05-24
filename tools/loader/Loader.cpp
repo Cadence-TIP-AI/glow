@@ -190,6 +190,11 @@ llvm::cl::opt<std::string> networkName(
 } // namespace
 
 llvm::StringRef Loader::getModelOptPath() {
+  assert(modelPathOpt.size() == 1 && "Model path must be a single path.");
+  return modelPathOpt[0];
+}
+
+llvm::StringRef Loader::getModelOptDir() {
   assert(modelPathOpt.size() == 1 &&
          llvm::sys::fs::is_directory(*modelPathOpt.begin()) &&
          "Model path must be a single directory.");
