@@ -28,72 +28,174 @@ namespace glow {
 
 llvm::cl::OptionCategory imageCat("Image Processing Options");
 
-ImageNormalizationMode imageNormMode;
-static llvm::cl::opt<ImageNormalizationMode, true> imageNormModeF(
-    "image-mode", llvm::cl::desc("Specify the image mode:"),
-    llvm::cl::cat(imageCat), llvm::cl::location(imageNormMode),
-    llvm::cl::values(clEnumValN(ImageNormalizationMode::kneg1to1, "neg1to1",
-                                "Values are in the range: -1 and 1"),
-                     clEnumValN(ImageNormalizationMode::k0to1, "0to1",
-                                "Values are in the range: 0 and 1"),
-                     clEnumValN(ImageNormalizationMode::k0to255, "0to255",
-                                "Values are in the range: 0 and 255"),
-                     clEnumValN(ImageNormalizationMode::kneg128to127,
-                                "neg128to127",
-                                "Values are in the range: -128 .. 127")),
-    llvm::cl::init(ImageNormalizationMode::k0to255));
+std::vector<ImageNormalizationMode> imageNormModeOpt;
+static llvm::cl::list<ImageNormalizationMode,
+                      std::vector<ImageNormalizationMode>>
+    imageNormModeF(
+        "image-mode", llvm::cl::CommaSeparated,
+        llvm::cl::desc("Specify the image mode:"), llvm::cl::cat(imageCat),
+        llvm::cl::location(imageNormModeOpt),
+        llvm::cl::values(clEnumValN(ImageNormalizationMode::kneg1to1, "neg1to1",
+                                    "Values are in the range: -1 and 1"),
+                         clEnumValN(ImageNormalizationMode::k0to1, "0to1",
+                                    "Values are in the range: 0 and 1"),
+                         clEnumValN(ImageNormalizationMode::k0to255, "0to255",
+                                    "Values are in the range: 0 and 255"),
+                         clEnumValN(ImageNormalizationMode::kneg128to127,
+                                    "neg128to127",
+                                    "Values are in the range: -128 .. 127")));
 static llvm::cl::alias imageNormModeA("i",
                                       llvm::cl::desc("Alias for -image-mode"),
                                       llvm::cl::aliasopt(imageNormModeF),
                                       llvm::cl::cat(imageCat));
 
-ImageChannelOrder imageChannelOrder;
-static llvm::cl::opt<ImageChannelOrder, true> imageChannelOrderF(
-    "image-channel-order", llvm::cl::desc("Specify the image channel order"),
-    llvm::cl::Optional, llvm::cl::cat(imageCat),
-    llvm::cl::location(imageChannelOrder),
-    llvm::cl::values(clEnumValN(ImageChannelOrder::BGR, "BGR", "Use BGR"),
-                     clEnumValN(ImageChannelOrder::RGB, "RGB", "Use RGB")),
-    llvm::cl::init(ImageChannelOrder::BGR));
+std::vector<ImageChannelOrder> imageChannelOrderOpt;
+static llvm::cl::list<ImageChannelOrder, std::vector<ImageChannelOrder>>
+    imageChannelOrderF(
+        "image-channel-order", llvm::cl::CommaSeparated,
+        llvm::cl::desc("Specify the image channel order"), llvm::cl::ZeroOrMore,
+        llvm::cl::cat(imageCat), llvm::cl::location(imageChannelOrderOpt),
+        llvm::cl::values(clEnumValN(ImageChannelOrder::BGR, "BGR", "Use BGR"),
+                         clEnumValN(ImageChannelOrder::RGB, "RGB", "Use RGB")));
 
-ImageLayout imageLayout;
-static llvm::cl::opt<ImageLayout, true>
-    imageLayoutF("image-layout",
-                 llvm::cl::desc("Specify which image layout to use"),
-                 llvm::cl::Optional, llvm::cl::cat(imageCat),
-                 llvm::cl::location(imageLayout),
-                 llvm::cl::values(clEnumValN(ImageLayout::NCHW, "NCHW",
-                                             "Use NCHW image layout"),
-                                  clEnumValN(ImageLayout::NHWC, "NHWC",
-                                             "Use NHWC image layout")),
-                 llvm::cl::init(ImageLayout::NCHW));
-static llvm::cl::alias imageLayoutA("l",
-                                    llvm::cl::desc("Alias for -image-layout"),
-                                    llvm::cl::aliasopt(imageLayoutF),
-                                    llvm::cl::cat(imageCat));
+std::vector<ImageLayout> imageLayoutOpt;
+static llvm::cl::list<ImageLayout, std::vector<ImageLayout>>
+    imageLayoutOptF("image-layout", llvm::cl::ZeroOrMore,
+                    llvm::cl::CommaSeparated,
+                    llvm::cl::location(imageLayoutOpt), llvm::cl::desc(".\n"),
+                    llvm::cl::values(clEnumValN(ImageLayout::NCHW, "NCHW",
+                                                "Use NCHW image layout"),
+                                     clEnumValN(ImageLayout::NHWC, "NHWC",
+                                                "Use NHWC image layout")),
+                    llvm::cl::cat(imageCat));
+static llvm::cl::alias
+    imageLayoutOptA("l", llvm::cl::desc("Alias for -image-layout"),
+                    llvm::cl::aliasopt(imageLayoutOptF),
+                    llvm::cl::cat(imageCat));
 
 bool useImagenetNormalization;
 static llvm::cl::opt<bool, true> useImagenetNormalizationF(
-    "use-imagenet-normalization",
+    "use-imagenet-normalization", llvm::cl::ZeroOrMore,
+    llvm::cl::location(useImagenetNormalization),
     llvm::cl::desc("Use Imagenet Normalization. This works in combination "
                    "with the Image Mode normalization."),
-    llvm::cl::cat(imageCat), llvm::cl::location(useImagenetNormalization),
-    llvm::cl::init(false));
+    llvm::cl::cat(imageCat));
 
-llvm::cl::list<float> meanValues(
+// LLVM command line made parser subclasing final in 3.7 yet the only cmd
+// line manual still refers to the old data. Also, the change was not clear
+// why it's made. Assigning callbacks is not possible, and subclassing
+// basic_parser is open to future errors. Thus, relying in LLVM parser is
+// minimized - we will just obtain strings and process options.
+
+VecVec<float> meanValuesOpt;
+static std::string meanValues_;
+static llvm::cl::opt<std::string, true> meanValuesF(
     "mean",
     llvm::cl::desc("Mean values m1,m2,m3..."
-                   "Count must be equal to number of input channels."),
-    llvm::cl::value_desc("float"), llvm::cl::ZeroOrMore,
-    llvm::cl::CommaSeparated, llvm::cl::cat(imageCat));
+                   "Count must be equal to number of input channels."
+                   "Order of values must match specified image channel order."),
+    llvm::cl::location(meanValues_), llvm::cl::value_desc("string"),
+    llvm::cl::cat(imageCat));
 
-llvm::cl::list<float> stddevValues(
+VecVec<float> stddevValuesOpt;
+static std::string stddevValues_;
+static llvm::cl::opt<std::string, true> stddevValuesF(
     "stddev",
     llvm::cl::desc("Standard deviation values s1,s2,s3..."
-                   "Count must be equal to number of input channels."),
-    llvm::cl::value_desc("float"), llvm::cl::ZeroOrMore,
-    llvm::cl::CommaSeparated, llvm::cl::cat(imageCat));
+                   "Count must be equal to number of input channels."
+                   "Order of values must match specified image channel order."),
+    llvm::cl::location(stddevValues_), llvm::cl::value_desc("string"),
+    llvm::cl::cat(imageCat));
+
 } // namespace glow
+
+/// Some global options are set from functions that can be called from
+/// multiple threads. Lock the access while setting them.
+std::mutex globalOpts;
+
+// Process list of lists command line in the following format:
+/// All elements in a list are comma separated. Lists are double-colon
+/// separated. For example, "-option=1,2,3:4,5,6" defines two lists each with 3
+/// elements. Final destination for the processed command line string \p cmdStr
+/// is double vector \p outVec.
+template <typename T>
+static void processListOfListsCmdOption(size_t numInputs, std::string &cmdStr,
+                                        VecVec<T> &outVec) {
+  std::vector<std::string> strVec;
+  std::vector<T> typeVec;
+  if (cmdStr.empty()) {
+    outVec.resize(numInputs);
+    return;
+  }
+  outVec.clear();
+  std::stringstream ss(cmdStr);
+  while (ss) {
+    T elem;
+    char sep;
+    ss >> elem >> sep;
+    typeVec.push_back(elem);
+    if (sep == ':') {
+      outVec.push_back(typeVec);
+      typeVec.clear();
+    } else {
+      CHECK(sep == ',') << "Expected either ',' or ':' as separator";
+    }
+  }
+  if (!typeVec.empty()) {
+    outVec.push_back(typeVec);
+  }
+}
+
+/// Clear external storage for cmd args defined in Image.
+void glow::initImageCmdArgVars() {
+  globalOpts.lock();
+  imageNormModeOpt.clear();
+  imageChannelOrderOpt.clear();
+  imageLayoutOpt.clear();
+  // inputLayoutOpt.clear();
+  meanValuesOpt.clear();
+  stddevValuesOpt.clear();
+  globalOpts.unlock();
+}
+
+/// Processes special command line options for Image module.
+void glow::processImageCmdArgVars(size_t numInputs) {
+  globalOpts.lock();
+  processListOfListsCmdOption(numInputs, meanValues_, meanValuesOpt);
+  processListOfListsCmdOption(numInputs, stddevValues_, stddevValuesOpt);
+
+  // Default for image range is U8.
+  if (imageNormModeOpt.empty()) {
+    for (size_t i = 0, e = numInputs; i < e; i++) {
+      imageNormModeOpt.push_back(ImageNormalizationMode::k0to255);
+    }
+  }
+  // Default for image layout is NCHW.
+  if (imageLayoutOpt.empty()) {
+    for (size_t i = 0, e = numInputs; i < e; i++) {
+      imageLayoutOpt.push_back(ImageLayout::NCHW);
+    }
+  }
+
+  // Default for channel order is BGR.
+  if (imageChannelOrderOpt.empty()) {
+    for (size_t i = 0, e = numInputs; i < e; i++) {
+      imageChannelOrderOpt.push_back(ImageChannelOrder::BGR);
+    }
+  }
+  globalOpts.lock();
+
+  CHECK_EQ(numInputs, imageNormModeOpt.size())
+      << "Number of -image-mode values must match number of inputs";
+  CHECK_EQ(numInputs, imageLayoutOpt.size())
+      << "Number of -image-layout values must match number of inputs";
+  CHECK_EQ(numInputs, imageChannelOrderOpt.size())
+      << "Number of -image-channel-order values must match number of inputs";
+  CHECK_EQ(numInputs, meanValuesOpt.size())
+      << "Number of -mean values must match number of inputs";
+  CHECK_EQ(numInputs, stddevValuesOpt.size())
+      << "Number of -stddev values must match number of inputs";
+}
 
 /// Convert the normalization to numeric floating poing ranges.
 std::pair<float, float> glow::normModeToRange(ImageNormalizationMode mode) {
@@ -109,6 +211,7 @@ std::pair<float, float> glow::normModeToRange(ImageNormalizationMode mode) {
   default:
     LOG(FATAL) << "Image format not defined.";
   }
+  return {0, 0};
 }
 
 std::tuple<size_t, size_t, bool> glow::getPngInfo(const char *filename) {
@@ -406,12 +509,13 @@ void glow::readPngImageAndPreprocess(Tensor &imageData,
   }
 }
 
-void glow::loadImagesAndPreprocess(const llvm::ArrayRef<std::string> &filenames,
-                                   Tensor *inputImageData,
-                                   ImageNormalizationMode imageNormMode,
-                                   ImageChannelOrder imageChannelOrder,
-                                   ImageLayout imageLayout) {
-  DCHECK(!filenames.empty())
+/// PNG images loader for a single input.
+static void readPngImagesAndPreprocess(
+    Tensor &inputImageData, const llvm::ArrayRef<std::string> &filenames,
+    ImageNormalizationMode imageNormMode, ImageChannelOrder imageChannelOrder,
+    ImageLayout imageLayout, llvm::ArrayRef<float> meanArg,
+    llvm::ArrayRef<float> stddevArg) {
+  CHECK(!filenames.empty())
       << "There must be at least one filename in filenames.";
   assert((dim_t)filenames.size() == filenames.size());
   dim_t numImages = filenames.size();
@@ -423,32 +527,34 @@ void glow::loadImagesAndPreprocess(const llvm::ArrayRef<std::string> &filenames,
   std::tie(imgHeight, imgWidth, isGray) = getPngInfo(filenames[0].c_str());
   const dim_t numChannels = isGray ? 1 : 3;
 
-  // Assign mean and stddev for input normalization.
   llvm::ArrayRef<float> mean;
   llvm::ArrayRef<float> stddev;
-  if (!meanValues.empty()) {
-    CHECK_EQ(meanValues.size(), numChannels)
-        << "Number of mean values != input channels";
+
+  std::vector<float> zeroMean(numChannels, 0.f);
+  std::vector<float> oneStd(numChannels, 1.f);
+
+  if (!meanArg.empty()) {
     CHECK(!useImagenetNormalization)
         << "-mean and -use-imagenet-normalization cannot be used together.";
-    mean = meanValues;
+    mean = meanArg;
   } else if (useImagenetNormalization) {
     mean = imagenetNormMean;
   } else {
     mean = zeroMean;
   }
 
-  if (!stddevValues.empty()) {
-    CHECK_EQ(stddevValues.size(), numChannels)
-        << "Number of stddev values != input channels";
+  if (!stddevArg.empty()) {
     CHECK(!useImagenetNormalization)
         << "-stddev and -use-imagenet-normalization cannot be used together.";
-    stddev = stddevValues;
+    stddev = stddevArg;
   } else if (useImagenetNormalization) {
     stddev = imagenetNormStd;
   } else {
     stddev = oneStd;
   }
+
+  CHECK_EQ(mean.size(), numChannels);
+  CHECK_EQ(stddev.size(), numChannels);
 
   // Allocate a tensor for the batch.
   ShapeVector batchDims;
@@ -459,18 +565,61 @@ void glow::loadImagesAndPreprocess(const llvm::ArrayRef<std::string> &filenames,
   case ImageLayout::NHWC:
     batchDims = {numImages, imgHeight, imgWidth, numChannels};
     break;
+  default:
+    LOG(FATAL) << "Unexpected layout\n";
   }
-  inputImageData->reset(ElemKind::FloatTy, batchDims);
-  auto IIDH = inputImageData->getHandle<>();
+  inputImageData.reset(ElemKind::FloatTy, batchDims);
+  auto IIDH = inputImageData.getHandle<>();
 
   // Read images into local tensors and add to batch.
   for (size_t n = 0; n < filenames.size(); n++) {
-    Tensor localCopy =
-        readPngImageAndPreprocess(filenames[n], imageNormMode,
-                                  imageChannelOrder, imageLayout, mean, stddev);
+    Tensor localCopy;
+    readPngImageAndPreprocess(localCopy, filenames[n], imageNormMode,
+                              imageChannelOrder, imageLayout, mean, stddev);
     DCHECK(std::equal(localCopy.dims().begin(), localCopy.dims().end(),
-                      inputImageData->dims().begin() + 1))
+                      inputImageData.dims().begin() + 1))
         << "All images must have the same dimensions";
     IIDH.insertSlice(localCopy, n);
+  }
+}
+
+void glow::loadImagesAndPreprocess(
+    VecVecRef<std::string> filenamesList,
+    llvm::ArrayRef<Tensor *> inputImageDataList,
+    llvm::ArrayRef<ImageNormalizationMode> normModeArg,
+    llvm::ArrayRef<ImageChannelOrder> channelOrderArg,
+    llvm::ArrayRef<ImageLayout> imageLayoutArg, VecVecRef<float> meanArg,
+    VecVecRef<float> stddevArg) {
+
+  CHECK(!filenamesList.empty())
+      << "There must be at least one list in filenames.";
+
+  CHECK_EQ(filenamesList.size(), inputImageDataList.size())
+      << "Number of image and tensor lists must match.";
+
+  llvm::ArrayRef<ImageNormalizationMode> normMode =
+      normModeArg.size() ? normModeArg : llvm::makeArrayRef(imageNormModeOpt);
+  llvm::ArrayRef<ImageChannelOrder> chOrder =
+      channelOrderArg.size() ? channelOrderArg
+                             : llvm::makeArrayRef(imageChannelOrderOpt);
+  llvm::ArrayRef<ImageLayout> imageLayout =
+      imageLayoutArg.size() ? imageLayoutArg
+                            : llvm::makeArrayRef(imageLayoutOpt);
+
+  VecVecRef<float> mean =
+      meanArg.size() ? meanArg : llvm::makeArrayRef(meanValuesOpt);
+  VecVecRef<float> stddev =
+      stddevArg.size() ? stddevArg : llvm::makeArrayRef(stddevValuesOpt);
+
+  for (size_t i = 0; i < filenamesList.size(); i++) {
+    // Get list of files for an input.
+    auto filenames = filenamesList[i];
+
+    // Get tensor to load for that one selected input.
+    auto inputImageData = inputImageDataList[i];
+    // All files for an input must be of the same type, thus will just check
+    // the first one.
+    readPngImagesAndPreprocess(*inputImageData, filenames, normMode[i],
+                               chOrder[i], imageLayout[i], mean[i], stddev[i]);
   }
 }

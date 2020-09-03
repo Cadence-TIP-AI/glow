@@ -61,9 +61,10 @@ class ProtobufLoader;
 
 class LoaderExtension {
 public:
-  /// Called once after model loading.
-  virtual void postModelLoad(Loader &, PlaceholderBindings &,
-                             TypeRef inputImageType) = 0;
+  /// Called once after ONNX or Caffe2 model loading.
+  virtual void postModelLoad(Loader &, PlaceholderBindings &, ProtobufLoader &,
+                             llvm::StringMap<Placeholder *> &,
+                             llvm::ArrayRef<TypeRef> inputImageType) = 0;
   /// Called once at the beginning of the mini-batch inference.
   virtual void inferInitMiniBatch(Loader &, PlaceholderBindings &,
                                   size_t minibatchIndex,
@@ -111,6 +112,10 @@ class Loader {
   CompilationInfo compilationInfo_;
 
 public:
+  /// Get model input names and types from the command line.
+  void getModelInputs(std::vector<std::string> &inputNames,
+                      std::vector<Type> *inputTypes = NULL);
+
   /// Getter for the hostManager, this can be useful for calling into the
   /// HostManager directly.
   runtime::HostManager *getHostManager() { return hostManager_.get(); }
@@ -202,7 +207,9 @@ public:
   /// Register a loader extension.
   Loader &registerExtension(std::unique_ptr<LoaderExtension> ext);
   /// Called once after model loading.
-  void postModelLoad(PlaceholderBindings &bindings, TypeRef inputImageType);
+  void postModelLoad(PlaceholderBindings &bindings, ProtobufLoader &protoLoader,
+                     llvm::StringMap<Placeholder *> &,
+                     llvm::ArrayRef<TypeRef> inputImageType);
   /// Called at the beginning of each mini-batch inference.
   void inferInitMiniBatch(PlaceholderBindings &bindings, size_t minibatchIndex,
                           size_t minibatchSize);

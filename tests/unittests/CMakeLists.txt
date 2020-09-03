@@ -91,7 +91,10 @@ add_glow_test(NAME Caffe2ImporterTest
               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 add_executable(LoaderTest
-               LoaderTest.cpp ../../tools/loader/Loader.cpp)
+               LoaderTest.cpp ../../tools/loader/Loader.cpp
+               ../../tools/loader/ExecutorCore.cpp
+               ../../tools/loader/ExecutorCoreHelperFunctions.cpp)
+
 target_link_libraries(LoaderTest
                                 PRIVATE
                                   Backends
@@ -322,6 +325,33 @@ if(PNG_FOUND)
                     --gtest_output=xml:ImageTest.xml
                 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
+
+add_executable(ImageLoaderTest
+               ImageLoaderTest.cpp 
+               ../../tools/loader/Loader.cpp
+               ../../tools/loader/ExecutorCore.cpp
+               ../../tools/loader/ExecutorCoreHelperFunctions.cpp)
+
+target_link_libraries(ImageLoaderTest
+                      PRIVATE
+                        Backend
+                        Backends
+                        Base
+                        Converter
+                        ExecutionEngine
+                        HostManager
+                        Graph
+                        Importer
+                        GraphOptimizer
+                        Quantization
+                        LLVMSupport
+                        gtest
+                        TestMain)
+
+add_glow_test(NAME ImageLoaderTest
+                        COMMAND ${GLOW_BINARY_DIR}/tests/ImageLoaderTest
+                           --gtest_output=xml:LoaderTest.xml --test_skip_cmd_args
+                        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 if(GLOW_WITH_CPU)
   add_executable(LLVMIRGenTest

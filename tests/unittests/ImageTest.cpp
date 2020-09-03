@@ -112,6 +112,54 @@ TEST(Image, writePngImage) {
   std::remove(outfilename.c_str());
 }
 
+TEST(Image, readMultipleInputsOpt) {
+  imageLayoutOpt = {ImageLayout::NCHW, ImageLayout::NCHW};
+  meanValuesOpt = {{127.5, 127.5, 127.5}, {0, 0, 0}};
+  stddevValuesOpt = {{2, 2, 2}, {1, 1, 1}};
+  imageChannelOrderOpt = {ImageChannelOrder::RGB, ImageChannelOrder::RGB};
+  imageNormModeOpt = {ImageNormalizationMode::k0to255,
+                      ImageNormalizationMode::k0to255};
+
+  std::vector<std::vector<std::string>> filenamesList = {
+      {"tests/images/imagenet/cat_285.png"},
+      {"tests/images/imagenet/cat_285.png"}};
+  Tensor image1;
+  Tensor image2;
+  loadImagesAndPreprocess(filenamesList, {&image1, &image2});
+
+  auto H1 = image1.getHandle();
+  auto H2 = image2.getHandle();
+  EXPECT_EQ(H1.size(), H2.size());
+  for (dim_t i = 0; i < H1.size(); i++) {
+    EXPECT_FLOAT_EQ((H2.raw(i) - 127.5) / 2, H1.raw(i));
+  }
+}
+
+TEST(Image, readMultipleInputsApi) {
+  std::vector<ImageLayout> layout = {ImageLayout::NHWC, ImageLayout::NHWC};
+  std::vector<std::vector<float>> mean = {{100, 100, 100}, {0, 0, 0}};
+  std::vector<std::vector<float>> stddev = {{1.5, 1.5, 1.5}, {1, 1, 1}};
+  std::vector<ImageChannelOrder> chOrder = {ImageChannelOrder::BGR,
+                                            ImageChannelOrder::BGR};
+  std::vector<ImageNormalizationMode> norm = {ImageNormalizationMode::k0to1,
+                                              ImageNormalizationMode::k0to1};
+
+  std::vector<std::vector<std::string>> filenamesList = {
+      {"tests/images/imagenet/cat_285.png"},
+      {"tests/images/imagenet/cat_285.png"}};
+  Tensor image1;
+  Tensor image2;
+  loadImagesAndPreprocess(filenamesList, {&image1, &image2}, norm, chOrder,
+                          layout, mean, stddev);
+
+  auto H1 = image1.getHandle();
+  auto H2 = image2.getHandle();
+  EXPECT_EQ(H1.size(), H2.size());
+  for (dim_t i = 0; i < H1.size(); i++) {
+    EXPECT_NEAR((H2.raw(i) - (100 / 255.)) / 1.5, H1.raw(i), 0.0000001);
+  }
+}
+
 /// Test writing a png image along with using the standard Imagenet
 /// normalization when reading the image.
 TEST(Image, writePngImageWithImagenetNormalization) {

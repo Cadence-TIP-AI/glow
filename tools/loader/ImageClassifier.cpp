@@ -21,6 +21,7 @@
 #include "glow/Graph/Nodes.h"
 #include "glow/Importer/Caffe2ModelLoader.h"
 #include "glow/Importer/ONNXModelLoader.h"
+#include "glow/Support/Support.h"
 
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/CommandLine.h"
@@ -171,9 +172,9 @@ static int processAndPrintResultsImpl(Tensor *SMT,
   // Softmax should have at least two dimensions: batchSize (first dimension),
   // numLabels (any other dimension), and optionally - 1 in all other
   // dimensions. The value of numLabels should be greater than 1.
-  DCHECK_GE(SMT->dims().size(), 2) << "Softmax should have at least 2 dims.";
+  CHECK_GE(SMT->dims().size(), 2) << "Softmax should have at least 2 dims.";
   const dim_t batchSize = SMT->dims()[0];
-  DCHECK_EQ(batchSize, imageList.size())
+  CHECK_EQ(batchSize, imageList.size())
       << "Softmax batch size must equal the input number of images.";
   size_t labelsDim = 0;
   for (size_t i = 1; i < SMT->dims().size(); i++) {
@@ -182,7 +183,7 @@ static int processAndPrintResultsImpl(Tensor *SMT,
       labelsDim = i;
     }
   }
-  DCHECK_NE(labelsDim, 0) << "Labels dimension not found!";
+  CHECK_NE(labelsDim, 0) << "Labels dimension not found!";
   const dim_t numLabels = SMT->dims()[labelsDim];
   // Get a view with canonical layout {batches, labels}.
   Tensor canonical = SMT->getUnowned({batchSize, numLabels});
@@ -221,9 +222,9 @@ static int processAndPrintResultsImpl(Tensor *SMT,
 
 class ImageClassifierProcessResult : public PostProcessOutputDataExtension {
 public:
-  int processOutputs(
-      const llvm::StringMap<Placeholder *> &PHM, PlaceholderBindings &bindings,
-      llvm::ArrayRef<std::string> inputImageBatchFilenames) override;
+  int processOutputs(const llvm::StringMap<Placeholder *> &PHM,
+                     PlaceholderBindings &bindings,
+                     VecVecRef<std::string> imageList) override;
 };
 
 /// Given the output PlaceHolder StringMap \p PHM, of size 1, from SoftMax and
@@ -232,26 +233,26 @@ public:
 /// mismatches.
 int ImageClassifierProcessResult::processOutputs(
     const llvm::StringMap<Placeholder *> &PHM, PlaceholderBindings &bindings,
-    llvm::ArrayRef<std::string> imageList) {
+    VecVecRef<std::string> imageList) {
 
   if (profilingGraph()) {
     LOG(INFO) << "Graph profiling is ON. Processing of output is disabled.";
     return 0;
   }
 
-  if (PHM.size() > 1) {
-    LOG(FATAL) << "Network has more then one output. Process results not "
-                  "run for ImageClassifier.";
+  Placeholder *phOut = getOutputForPostProcessing(PHM);
+  if (!phOut) {
+    return 0;
   }
 
   auto *SMT = bindings.get(PHM.begin()->second);
   switch (SMT->getElementType()) {
   case ElemKind::FloatTy:
-    return processAndPrintResultsImpl<float>(SMT, imageList);
+    return processAndPrintResultsImpl<float>(SMT, imageList[0]);
   case ElemKind::Float16Ty:
-    return processAndPrintResultsImpl<float16_t>(SMT, imageList);
+    return processAndPrintResultsImpl<float16_t>(SMT, imageList[0]);
   case ElemKind::BFloat16Ty:
-    return processAndPrintResultsImpl<bfloat16_t>(SMT, imageList);
+    return processAndPrintResultsImpl<bfloat16_t>(SMT, imageList[0]);
   default:
     llvm_unreachable("Type not supported");
   }
@@ -262,11 +263,11 @@ int main(int argc, char **argv) {
 
   if (!expectedMatchingLabels.empty()) {
     // The number of category indices must match the number of files.
-    if (expectedMatchingLabels.size() != inputImageFilenames.size()) {
+    if (expectedMatchingLabels.size() != inputImageFilenamesOpt[0].size()) {
       llvm::errs() << "Number of matching indices: "
                    << expectedMatchingLabels.size()
                    << " doesn't match the number of files: "
-                   << inputImageFilenames.size() << "\n";
+                   << inputImageFilenamesOpt[0].size() << "\n";
       return 1;
     }
   }
@@ -277,6 +278,7 @@ int main(int argc, char **argv) {
     return std::make_unique<ImageClassifierProcessResult>();
   };
   core.registerPostProcessOutputExtension(printResultCreator);
+
   int numErrors = core.executeNetwork();
   return numErrors;
 }
