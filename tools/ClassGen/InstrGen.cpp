@@ -314,7 +314,7 @@ int main(int argc, char **argv) {
   BB.newInstr("BatchedReduceAdd")
       .addOperand("Dest", OperandKind::Out)
       .addOperand("Batch", OperandKind::In)
-      .addMember(MemberType::Unsigned, "Axis")
+      .addMember(MemberType::VectorUnsigned, "Axes")
       .autoVerify(VerifyKind::SameElementType, {"Dest", "Batch"})
       .autoIRGen();
 
@@ -344,7 +344,7 @@ int main(int argc, char **argv) {
   BB.newInstr("BatchedReduceProd")
       .addOperand("Dest", OperandKind::Out)
       .addOperand("Batch", OperandKind::In)
-      .addMember(MemberType::Unsigned, "Axis")
+      .addMember(MemberType::VectorUnsigned, "Axes")
       .autoVerify(VerifyKind::SameElementType, {"Dest", "Batch"})
       .autoIRGen();
 
