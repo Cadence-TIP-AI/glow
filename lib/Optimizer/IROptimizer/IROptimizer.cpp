@@ -1626,6 +1626,7 @@ bool MakeWeightsConst::run(IRFunction *M, const CompilationContext &cctx) {
 }
 
 bool ShareBuffers::run(IRFunction *M, const CompilationContext &cctx) {
+  return false;
   return shareBuffers(*M);
 }
 
